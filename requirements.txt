@@ -1,0 +1,5 @@
+seleniumbase>=4.21.0
+selenium>=4.15.0
+fake-useragent>=1.4.0
+supabase>=2.0.0
+python-dotenv>=1.0.0

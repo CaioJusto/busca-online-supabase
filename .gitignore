@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+application.log
+downloaded_files/
+.context/
+service_account.json
+*.xlsx
+venv/
+.venv/
