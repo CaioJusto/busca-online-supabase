@@ -271,16 +271,27 @@ class ProjudiScraper:
                     if self._is_driver_connection_error(str(e)):
                         raise DriverRestartNeeded(str(e))
 
+                # Wait for page to load
+                time.sleep(2)
+                self.logger.info(f"URL após navegação: {driver.current_url}")
+                self.logger.info(f"Title: {driver.title}")
+
                 login_input = None
-                for i in range(5):
+                for i in range(10):
                     try:
                         login_input = driver.find_element(By.XPATH, '//*[@id="login"]')
                         break
                     except NoSuchElementException:
-                        if i < 4:
-                            time.sleep(0.05)
+                        if i < 9:
+                            time.sleep(0.3)
                 if not login_input:
-                    login_input = self.esperar_condicao(driver, EC.presence_of_element_located((By.XPATH, '//*[@id="login"]')), timeout=1.5, tentativas=3)
+                    # Log page source snippet for debugging
+                    try:
+                        page_src = driver.page_source[:500]
+                        self.logger.warning(f"Página não contém #login. Source: {page_src}")
+                    except:
+                        pass
+                    login_input = self.esperar_condicao(driver, EC.presence_of_element_located((By.XPATH, '//*[@id="login"]')), timeout=3, tentativas=3)
                 login_input.clear()
                 login_input.send_keys(self.projudi_usuario)
 
@@ -698,7 +709,8 @@ class ProjudiScraper:
 
         try:
             porta = porta_debug_livre()
-            with SB(uc=True, headless=True, chromium_arg=f"--remote-debugging-port={porta}",
+            with SB(uc=True, headless=True,
+                     chromium_arg=f"--remote-debugging-port={porta},--no-sandbox,--disable-dev-shm-usage,--disable-gpu,--disable-extensions",
                      agent=user_agent) as sb:
                 configurar_driver(sb)
                 driver = sb.driver
