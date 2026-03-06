@@ -845,6 +845,38 @@ class ProjudiScraper:
         finally:
             self._desmarcar_sessao_browser_ativa(worker_id)
 
+    # ─── Search (without saving) ───
+
+    def search_by_cnj(self, numero_cnj):
+        """Busca dados de um processo pelo CNJ sem salvar no Supabase."""
+        self.logger.info(f"[SEARCH] Buscando {numero_cnj} (sem salvar)")
+        self._reset_login_realizado()
+        self._marcar_sessao_browser_ativa(99)
+
+        try:
+            porta = porta_debug_livre()
+            with SB(uc=True, headless=True,
+                     chromium_arg=f"--remote-debugging-port={porta},--no-sandbox,--disable-dev-shm-usage,--disable-gpu,--disable-extensions",
+                     agent=user_agent) as sb:
+                configurar_driver(sb)
+                driver = sb.driver
+                wait = WebDriverWait(driver, 2)
+                self.realizar_login_projudi(driver)
+
+                dados = self.extrair_dados_processo(driver, wait, numero_cnj)
+                if dados:
+                    self.logger.info(f"[SEARCH] Encontrado: {numero_cnj}")
+                    return {'found': True, 'data': dados}
+                else:
+                    self.logger.info(f"[SEARCH] Não encontrado: {numero_cnj}")
+                    return {'found': False, 'data': None}
+        except Exception as e:
+            self.logger.error(f"[SEARCH] Erro: {e}")
+            self.logger.debug(traceback.format_exc())
+            return {'found': False, 'data': None, 'error': str(e)}
+        finally:
+            self._desmarcar_sessao_browser_ativa(99)
+
     # ─── Main entry point ───
 
     def run(self, processo_ids=None):
@@ -905,18 +937,33 @@ def create_http_handler(scraper):
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
-            if self.path == '/sync':
-                content_length = int(self.headers.get('Content-Length', 0))
-                body = json.loads(self.rfile.read(content_length)) if content_length else {}
-                processo_ids = body.get('processo_ids')
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
 
-                # Run in thread to not block
+            if self.path == '/sync':
+                processo_ids = body.get('processo_ids')
                 result = scraper.run(processo_ids=processo_ids)
 
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.end_headers()
                 self.wfile.write(json.dumps(result).encode())
+
+            elif self.path == '/search':
+                numero_cnj = body.get('numero_cnj')
+                if not numero_cnj:
+                    self.send_response(400)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'error': 'numero_cnj obrigatório'}).encode())
+                    return
+
+                result = scraper.search_by_cnj(numero_cnj)
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(result, default=str).encode())
+
             else:
                 self.send_response(404)
                 self.end_headers()
