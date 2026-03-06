@@ -139,8 +139,16 @@ class ProjudiScraper:
             .execute()
         return result.data or []
 
-    def save_to_supabase(self, processo_id, dados):
-        """Salva dados extraídos do PROJUDI no Supabase."""
+    def save_to_supabase(self, processo_id, dados, is_update=True):
+        """Salva dados extraídos do PROJUDI no Supabase.
+
+        Args:
+            processo_id: ID do processo no Supabase
+            dados: Dados extraídos do PROJUDI
+            is_update: Se True (default), só atualiza andamentos, synced_at,
+                       usuario_ultima_mov e campos custom_data do PROJUDI.
+                       Se False (primeira sync), atualiza tudo incluindo SQL columns.
+        """
         # Fetch existing custom_data to merge
         existing = self.supabase.table('processos') \
             .select('custom_data') \
@@ -149,7 +157,7 @@ class ProjudiScraper:
             .execute()
         existing_custom = (existing.data or {}).get('custom_data') or {}
 
-        # Build updated custom_data
+        # Build updated custom_data - always update these PROJUDI fields
         updated_custom = {
             **existing_custom,
             'projudi_autor': dados.get('autor', ''),
@@ -159,29 +167,54 @@ class ProjudiScraper:
             'projudi_usuario_ultima_mov': dados.get('usuario_ultima_mov', ''),
         }
 
+        # Always update PROJUDI-specific custom_data fields
+        if dados.get('comarca'):
+            updated_custom['projudi_comarca'] = dados['comarca']
+        if dados.get('valor_causa'):
+            updated_custom['projudi_valor_causa'] = dados['valor_causa']
+
+        # New PROJUDI fields - always saved to custom_data with projudi_ prefix
+        new_projudi_fields = {
+            'area': 'projudi_area',
+            'serventia': 'projudi_serventia',
+            'classe': 'projudi_classe',
+            'valor_condenacao': 'projudi_valor_condenacao',
+            'processo_originario': 'projudi_processo_originario',
+            'fase_processual': 'projudi_fase_processual',
+            'segredo_justica': 'projudi_segredo_justica',
+            'data_transito_julgado': 'projudi_data_transito_julgado',
+            'status_projudi': 'projudi_status',
+            'prioridade_projudi': 'projudi_prioridade',
+            'efeito_suspensivo': 'projudi_efeito_suspensivo',
+            'julgado_2grau': 'projudi_julgado_2grau',
+            'custas': 'projudi_custas',
+            'penhora_rosto': 'projudi_penhora_rosto',
+        }
+        for dados_key, custom_key in new_projudi_fields.items():
+            value = dados.get(dados_key, '')
+            if value:
+                updated_custom[custom_key] = value
+
         # Core fields to update directly (SQL columns)
         update_payload = {
             'custom_data': updated_custom,
             'updated_at': datetime.now().isoformat(),
         }
 
-        # Only update core fields if they have actual values
-        if dados.get('comarca'):
-            # Comarca goes to custom_data (not a SQL column by default)
-            updated_custom['projudi_comarca'] = dados['comarca']
-        if dados.get('valor_causa'):
-            updated_custom['projudi_valor_causa'] = dados['valor_causa']
-        if dados.get('assunto') and dados['assunto'] not in ('', 'Não encontrado (timeout)'):
-            update_payload['assunto'] = dados['assunto']
-        if dados.get('data_distribuicao'):
-            update_payload['data_distribuicao'] = dados['data_distribuicao']
+        # Only update SQL-level columns on first sync (creation), not on updates
+        if not is_update:
+            if dados.get('assunto') and dados['assunto'] not in ('', 'Não encontrado (timeout)'):
+                update_payload['assunto'] = dados['assunto']
+            if dados.get('data_distribuicao'):
+                update_payload['data_distribuicao'] = dados['data_distribuicao']
 
         self.supabase.table('processos') \
             .update(update_payload) \
             .eq('id', processo_id) \
             .execute()
 
-        self.logger.info(f"[SUPABASE] Processo {processo_id} atualizado com {len(dados.get('andamentos', []))} andamentos")
+        mode_label = "update" if is_update else "creation"
+        self.logger.info(f"[SUPABASE] Processo {processo_id} atualizado ({mode_label}) com {len(dados.get('andamentos', []))} andamentos")
 
     # ─── Selenium helpers (preserved from original) ───
 
@@ -405,6 +438,29 @@ class ProjudiScraper:
             pass
 
     # ─── Core extraction ───
+
+    def extrair_campo_por_label(self, driver, label_text):
+        """Extract a field value by finding its label text in the page."""
+        try:
+            scripts = [
+                f"""
+                var labels = document.querySelectorAll('span, div, td, label');
+                for (var i = 0; i < labels.length; i++) {{
+                    if (labels[i].textContent.trim() === '{label_text}') {{
+                        var next = labels[i].nextElementSibling;
+                        if (next) return next.textContent.trim();
+                    }}
+                }}
+                return '';
+                """
+            ]
+            for script in scripts:
+                result = driver.execute_script(script)
+                if result:
+                    return result
+        except Exception as e:
+            self.logger.debug(f"Erro ao extrair campo '{label_text}': {e}")
+        return ''
 
     def extrair_todos_andamentos(self, driver, wait):
         """Extrai TODOS os andamentos da tabela de movimentações (não só o último)."""
@@ -678,6 +734,26 @@ class ProjudiScraper:
                     if isinstance(dados.get(campo), str):
                         dados[campo] = dados[campo].strip()
 
+                # Extract additional fields from "Outras Informações" using label-based approach
+                campos_label = {
+                    'area': 'Área:',
+                    'serventia': 'Serventia:',
+                    'classe': 'Classe:',
+                    'valor_condenacao': 'Valor da Condenação:',
+                    'processo_originario': 'Processo Originário:',
+                    'fase_processual': 'Fase Processual:',
+                    'segredo_justica': 'Segredo de Justiça:',
+                    'data_transito_julgado': 'Data do Trânsito em Julgado:',
+                    'status_projudi': 'Status:',
+                    'prioridade_projudi': 'Prioridade:',
+                    'efeito_suspensivo': 'Efeito Suspensivo:',
+                    'julgado_2grau': 'Julgado 2º Grau:',
+                    'custas': 'Custas:',
+                    'penhora_rosto': 'Penhora no Rosto:',
+                }
+                for campo_key, label_text in campos_label.items():
+                    dados[campo_key] = self.extrair_campo_por_label(driver, label_text)
+
                 # Extract ALL andamentos
                 dados['andamentos'] = self.extrair_todos_andamentos(driver, wait)
 
@@ -732,7 +808,10 @@ class ProjudiScraper:
                     try:
                         dados = self.extrair_dados_processo(driver, wait, numero_cnj)
                         if dados:
-                            self.save_to_supabase(processo_id, dados)
+                            # Determine if this is an update (already synced) or first creation
+                            existing_custom = (processo.get('custom_data') or {})
+                            is_update = bool(existing_custom.get('projudi_synced_at'))
+                            self.save_to_supabase(processo_id, dados, is_update=is_update)
                             with self.lock:
                                 self.processos_concluidos.add(processo_id)
                                 resultados.append({'id': processo_id, 'status': 'ok', 'andamentos': len(dados.get('andamentos', []))})
