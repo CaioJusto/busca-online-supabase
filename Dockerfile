@@ -1,9 +1,8 @@
 FROM python:3.11-slim
 
-# Install Chrome dependencies
+# Install Chrome via direct .deb download (most reliable method)
 RUN apt-get update && apt-get install -y \
     wget \
-    gnupg2 \
     unzip \
     curl \
     fonts-liberation \
@@ -26,15 +25,9 @@ RUN apt-get update && apt-get install -y \
     libxrandr2 \
     xdg-utils \
     procps \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install Chrome (modern method without apt-key)
-RUN wget -q -O /tmp/chrome-key.gpg https://dl-ssl.google.com/linux/linux_signing_key.pub \
-    && gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg /tmp/chrome-key.gpg \
-    && echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list \
-    && apt-get update \
-    && apt-get install -y google-chrome-stable \
-    && rm -rf /var/lib/apt/lists/* /tmp/chrome-key.gpg
+    && wget -q -O /tmp/chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
+    && apt-get install -y /tmp/chrome.deb \
+    && rm -rf /tmp/chrome.deb /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -43,4 +36,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["python", "scraper.py"]
+# Railway: run as HTTP server by default
+CMD ["python", "scraper.py", "--server"]
